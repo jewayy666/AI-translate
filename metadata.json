@@ -1,0 +1,7 @@
+{
+  "name": "AI Audio Transcriber & Vocabulary Builder",
+  "description": "An advanced tool that transcribes English audio, distinguishes speakers, provides Traditional Chinese translations, and extracts academic level vocabulary with IPA and example sentences.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
