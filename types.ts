@@ -3,6 +3,8 @@ export interface TranscriptLine {
   speaker: string;
   english: string;
   chinese: string;
+  startTimeInSeconds: number;
+  endTimeInSeconds: number;
 }
 
 export interface VocabularyItem {
