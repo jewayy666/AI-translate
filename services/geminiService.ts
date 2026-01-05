@@ -2,57 +2,108 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { TranscriptionResult, TranscriptLine } from "../types";
 
-const CHUNK_SIZE_LIMIT = 5 * 1024 * 1024; // Increased to 5MB for better parallel efficiency
-const MAX_CONCURRENCY = 5; // Process up to 5 chunks at once to balance speed and rate limits
+const CHUNK_DURATION_LIMIT = 300; // 5 minutes in seconds
+const OVERLAP_DURATION = 2; // 2 seconds overlap
+const MAX_CONCURRENCY = 4; // Moderate concurrency for stability
 
 export const parseTimeToSeconds = (time: string | number): number => {
   if (typeof time === 'number') return time;
   if (!time) return 0;
   const parts = time.split(':').map(Number);
   if (parts.length === 2) {
-    // MM:SS
     return parts[0] * 60 + parts[1];
   }
   if (parts.length === 3) {
-    // HH:MM:SS
     return parts[0] * 3600 + parts[1] * 60 + parts[2];
   }
   return parseFloat(time) || 0;
 };
 
-export class GeminiService {
-  private async getAudioDuration(blob: Blob): Promise<number> {
-    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-    const arrayBuffer = await blob.arrayBuffer();
-    try {
-      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-      return audioBuffer.duration;
-    } catch (e) {
-      console.warn("Could not decode audio duration, estimating based on 128kbps", e);
-      return (blob.size / (128 * 1024 / 8)); 
-    } finally {
-      audioContext.close();
-    }
+/**
+ * Converts an AudioBuffer to a WAV Blob.
+ */
+function bufferToWav(abuffer: AudioBuffer): Blob {
+  const numOfChan = abuffer.numberOfChannels;
+  const length = abuffer.length * numOfChan * 2 + 44;
+  const buffer = new ArrayBuffer(length);
+  const view = new DataView(buffer);
+  const channels = [];
+  let i;
+  let sample;
+  let offset = 0;
+  let pos = 0;
+
+  function setUint16(data: number) {
+    view.setUint16(pos, data, true);
+    pos += 2;
   }
 
-  async transcribeChunk(base64Data: string, mimeType: string, timeOffset: number, chunkDuration: number): Promise<TranscriptionResult> {
+  function setUint32(data: number) {
+    view.setUint32(pos, data, true);
+    pos += 4;
+  }
+
+  setUint32(0x46464952); // "RIFF"
+  setUint32(length - 8); // file length - 8
+  setUint32(0x45564157); // "WAVE"
+
+  setUint32(0x20746d66); // "fmt " chunk
+  setUint32(16); // length = 16
+  setUint16(1); // PCM
+  setUint16(numOfChan);
+  setUint32(abuffer.sampleRate);
+  setUint32(abuffer.sampleRate * 2 * numOfChan);
+  setUint16(numOfChan * 2);
+  setUint16(16);
+
+  setUint32(0x61746164); // "data" chunk
+  setUint32(length - pos - 4);
+
+  for (i = 0; i < numOfChan; i++) channels.push(abuffer.getChannelData(i));
+
+  while (pos < length) {
+    for (i = 0; i < numOfChan; i++) {
+      sample = Math.max(-1, Math.min(1, channels[i][offset]));
+      sample = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+      view.setInt16(pos, sample, true);
+      pos += 2;
+    }
+    offset++;
+  }
+
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+export class GeminiService {
+  async transcribeChunk(
+    base64Data: string,
+    mimeType: string,
+    chunkStartTime: number
+  ): Promise<TranscriptionResult> {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    
+
     const prompt = `
-      You are a high-precision audio-to-text synchronization engine. 
-      Analyze this audio clip (Clip starts at global time ${timeOffset.toFixed(3)}s, duration ${chunkDuration.toFixed(3)}s).
+      You are a high-precision audio transcription engine.
+      This audio clip is part of a longer recording.
+      
+      CLIP GLOBAL START OFFSET: ${chunkStartTime.toFixed(2)} seconds.
       
       CRITICAL TASK:
       1. Provide a millisecond-accurate English transcript.
-      2. For every segment, capture the EXACT start and end timestamps.
-      3. For every segment, provide a natural Traditional Chinese translation.
-      4. Global Time = ${timeOffset.toFixed(3)} + Relative Time within this clip.
+      2. For every segment, capture start and end timestamps.
+      3. All timestamps must be GLOBAL.
+         Global Time = ${chunkStartTime.toFixed(2)} + Relative Time within this specific clip.
+      4. Provide a natural Traditional Chinese translation for each segment.
       
-      IMPORTANT RULES:
-      - 'startTimeInSeconds' and 'endTimeInSeconds' MUST be RAW NUMBERS (floats).
-      - Ensure 'endTimeInSeconds' is strictly greater than 'startTimeInSeconds'.
+      STRICT TIMESTAMP RULES:
+      - Do NOT trim or ignore any silence at the beginning of the audio file. 
+      - If the audio starts with 5 seconds of silence and the first word is spoken at 00:05 relative to this clip, the global timestamp for that word MUST be (${chunkStartTime.toFixed(2)} + 5.00).
+      - Your timestamps must align perfectly with the raw audio waveform provided.
+      - 'startTimeInSeconds' and 'endTimeInSeconds' MUST be floats (numbers).
+      
+      CONTENT RULES:
+      - Extract B2+ academic vocabulary with IPA and Traditional Chinese definitions.
       - Transcribe accurately in English and translate to Traditional Chinese (Taiwan style).
-      - Extract B2+ academic vocabulary with Traditional Chinese definitions.
 
       Return ONLY JSON:
       {
@@ -64,7 +115,9 @@ export class GeminiService {
     try {
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
-        contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType, data: base64Data } }] }],
+        contents: [
+          { parts: [{ text: prompt }, { inlineData: { mimeType, data: base64Data } }] },
+        ],
         config: {
           responseMimeType: "application/json",
           thinkingConfig: { thinkingBudget: 2000 },
@@ -80,10 +133,10 @@ export class GeminiService {
                     english: { type: Type.STRING },
                     chinese: { type: Type.STRING },
                     startTimeInSeconds: { type: Type.NUMBER },
-                    endTimeInSeconds: { type: Type.NUMBER }
+                    endTimeInSeconds: { type: Type.NUMBER },
                   },
-                  required: ["speaker", "english", "chinese", "startTimeInSeconds", "endTimeInSeconds"]
-                }
+                  required: ["speaker", "english", "chinese", "startTimeInSeconds", "endTimeInSeconds"],
+                },
               },
               vocabulary: {
                 type: Type.ARRAY,
@@ -93,25 +146,25 @@ export class GeminiService {
                     word: { type: Type.STRING },
                     ipa: { type: Type.STRING },
                     definition: { type: Type.STRING },
-                    example: { type: Type.STRING }
+                    example: { type: Type.STRING },
                   },
-                  required: ["word", "ipa", "definition", "example"]
-                }
-              }
+                  required: ["word", "ipa", "definition", "example"],
+                },
+              },
             },
-            required: ["transcript", "vocabulary"]
-          }
-        }
+            required: ["transcript", "vocabulary"],
+          },
+        },
       });
-      
-      const parsed = JSON.parse(response.text || '{}') as TranscriptionResult;
-      
-      parsed.transcript = (parsed.transcript || []).map(line => ({
+
+      const parsed = JSON.parse(response.text || "{}") as TranscriptionResult;
+
+      parsed.transcript = (parsed.transcript || []).map((line) => ({
         ...line,
         startTimeInSeconds: parseTimeToSeconds(line.startTimeInSeconds),
-        endTimeInSeconds: parseTimeToSeconds(line.endTimeInSeconds)
+        endTimeInSeconds: parseTimeToSeconds(line.endTimeInSeconds),
       }));
-      
+
       return parsed;
     } catch (error) {
       console.error("Transcription chunk error:", error);
@@ -119,108 +172,114 @@ export class GeminiService {
     }
   }
 
-  async processAudio(file: File, onProgress: (status: string, progress: number) => void): Promise<TranscriptionResult> {
-    onProgress("正在預處理音檔結構...", 2);
+  async processAudio(
+    file: File,
+    onProgress: (status: string, progress: number) => void
+  ): Promise<TranscriptionResult> {
+    onProgress("正在解碼音訊文件 (精準對位中)...", 5);
+
+    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const arrayBuffer = await file.arrayBuffer();
+    const fullBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+    const duration = fullBuffer.duration;
+
+    const chunks: { blob: Blob; startTime: number }[] = [];
     
-    // Get total duration once to accurately calculate offsets
-    const totalDuration = await this.getAudioDuration(file);
-    
-    const chunkInfos: { blob: Blob; offset: number; duration: number }[] = [];
-    let byteOffset = 0;
-    
-    // Calculate chunk boundaries based on file size and total duration (assuming roughly linear duration/size)
-    while (byteOffset < file.size) {
-      const end = Math.min(byteOffset + CHUNK_SIZE_LIMIT, file.size);
-      const blob = file.slice(byteOffset, end);
-      const chunkOffset = (byteOffset / file.size) * totalDuration;
-      const chunkDuration = ((end - byteOffset) / file.size) * totalDuration;
+    onProgress("正在分割音訊區塊...", 10);
+
+    for (let start = 0; start < duration; start += CHUNK_DURATION_LIMIT) {
+      const end = Math.min(start + CHUNK_DURATION_LIMIT + OVERLAP_DURATION, duration);
+      const sliceLength = Math.floor((end - start) * fullBuffer.sampleRate);
       
-      chunkInfos.push({ blob, offset: chunkOffset, duration: chunkDuration });
-      byteOffset = end;
+      const subBuffer = audioCtx.createBuffer(
+        fullBuffer.numberOfChannels,
+        sliceLength,
+        fullBuffer.sampleRate
+      );
+
+      for (let ch = 0; ch < fullBuffer.numberOfChannels; ch++) {
+        const sourceData = fullBuffer.getChannelData(ch);
+        const startSample = Math.floor(start * fullBuffer.sampleRate);
+        const endSample = Math.floor(end * fullBuffer.sampleRate);
+        const subData = sourceData.subarray(startSample, endSample);
+        subBuffer.copyToChannel(subData, ch);
+      }
+
+      chunks.push({
+        blob: bufferToWav(subBuffer),
+        startTime: start,
+      });
     }
 
-    onProgress(`已切分為 ${chunkInfos.length} 個區塊，啟動並行分析引擎...`, 5);
+    onProgress(`準備發送到並行分析引擎 (共 ${chunks.length} 個區塊)...`, 15);
 
     const fullResult: TranscriptionResult = { transcript: [], vocabulary: [] };
+    const results: TranscriptionResult[] = new Array(chunks.length);
     let completedCount = 0;
 
-    // Use a limited concurrency pool to avoid hitting rate limits while staying fast
-    const results: TranscriptionResult[] = [];
-    
-    const runInParallel = async () => {
-      const pool: Promise<void>[] = [];
-      for (let i = 0; i < chunkInfos.length; i++) {
-        const info = chunkInfos[i];
-        
-        const task = (async (index: number) => {
-          const base64 = await this.blobToBase64(info.blob);
-          try {
-            const result = await this.transcribeChunk(
-              base64, 
-              file.type || 'audio/mp3', 
-              info.offset, 
-              info.duration
-            );
-            results[index] = result;
-          } catch (e) {
-            console.error(`Chunk ${index} failed:`, e);
-            results[index] = { transcript: [], vocabulary: [] };
-          }
-          
-          completedCount++;
-          const progress = Math.floor((completedCount / chunkInfos.length) * 90) + 5;
-          onProgress(`並行分析中 (${completedCount}/${chunkInfos.length})...`, progress);
-        })(i);
-
-        pool.push(task);
-        if (pool.length >= MAX_CONCURRENCY) {
-          await Promise.race(pool);
-          // Remove completed tasks from pool
-          // Note: In a production environment, we'd use a more robust queue, 
-          // but for this UI, simple race/all is sufficient.
-          for (let j = pool.length - 1; j >= 0; j--) {
-             // Basic promise tracking would be better, but this suffices for the requirement
-          }
-        }
+    const tasks = chunks.map(async (chunk, index) => {
+      // Use a basic semaphore logic for concurrency
+      while (completedCount - results.filter(r => r).length >= MAX_CONCURRENCY) {
+        await new Promise(r => setTimeout(r, 100));
       }
-      await Promise.all(pool);
-    };
 
-    await runInParallel();
+      const reader = new FileReader();
+      const base64Promise = new Promise<string>((resolve) => {
+        reader.onloadend = () => resolve((reader.result as string).split(",")[1]);
+        reader.readAsDataURL(chunk.blob);
+      });
 
-    onProgress("整合分析數據中...", 95);
+      const base64 = await base64Promise;
+      try {
+        const result = await this.transcribeChunk(base64, "audio/wav", chunk.startTime);
+        results[index] = result;
+      } catch (e) {
+        console.error(`Chunk ${index} failed:`, e);
+        results[index] = { transcript: [], vocabulary: [] };
+      }
 
-    // Merge results and handle duplicates/overlaps
+      completedCount++;
+      onProgress(
+        `並行分析中 (${completedCount}/${chunks.length})...`,
+        Math.floor((completedCount / chunks.length) * 80) + 15
+      );
+    });
+
+    await Promise.all(tasks);
+
+    onProgress("整合全域時間線...", 98);
+
     results.forEach((chunkResult) => {
       if (!chunkResult) return;
 
-      (chunkResult.transcript || []).forEach(newLine => {
-        const isDuplicate = fullResult.transcript.some(existingLine => 
-          Math.abs(existingLine.startTimeInSeconds - newLine.startTimeInSeconds) < 0.3 && 
-          existingLine.english.substring(0, 15).toLowerCase() === newLine.english.substring(0, 15).toLowerCase()
+      (chunkResult.transcript || []).forEach((newLine) => {
+        // Strict timestamp check to filter out data from overlap zones
+        const isDuplicate = fullResult.transcript.some(
+          (existingLine) =>
+            Math.abs(existingLine.startTimeInSeconds - newLine.startTimeInSeconds) < 0.2 &&
+            existingLine.english.substring(0, 10).toLowerCase() ===
+              newLine.english.substring(0, 10).toLowerCase()
         );
         if (!isDuplicate) {
           fullResult.transcript.push(newLine);
         }
       });
 
-      (chunkResult.vocabulary || []).forEach(item => {
-        if (!fullResult.vocabulary.find(v => v.word.toLowerCase() === item.word.toLowerCase())) {
+      (chunkResult.vocabulary || []).forEach((item) => {
+        if (
+          !fullResult.vocabulary.find(
+            (v) => v.word.toLowerCase() === item.word.toLowerCase()
+          )
+        ) {
           fullResult.vocabulary.push(item);
         }
       });
     });
 
     fullResult.transcript.sort((a, b) => a.startTimeInSeconds - b.startTimeInSeconds);
+    audioCtx.close();
+    
     onProgress("分析完成！", 100);
     return fullResult;
-  }
-
-  private async blobToBase64(blob: Blob): Promise<string> {
-    return new Promise((resolve) => {
-      const reader = new FileReader();
-      reader.onloadend = () => resolve((reader.result as string).split(',')[1]);
-      reader.readAsDataURL(blob);
-    });
   }
 }

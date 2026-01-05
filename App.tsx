@@ -44,7 +44,7 @@ const App: React.FC = () => {
     const t = currentTime;
     let foundIndex = -1;
 
-    // The segment is active if currentTime >= currentStart AND currentTime < nextStart
+    // Highlighting Logic: t >= currentStart AND t < nextStart (deterministic sync)
     for (let i = 0; i < result.transcript.length; i++) {
       const currentStart = parseTimeToSeconds(result.transcript[i].startTimeInSeconds);
       const nextStart = result.transcript[i + 1] 
@@ -57,12 +57,10 @@ const App: React.FC = () => {
       }
     }
 
-    // DEBUG LOG: Print current audio time and the start time of the identified active segment
+    // DEBUG LOG: Verification of synchronization
     if (foundIndex !== -1) {
       const activeStart = parseTimeToSeconds(result.transcript[foundIndex].startTimeInSeconds);
       console.log(`Current Audio Time: ${t.toFixed(3)}s | Active Segment Start: ${activeStart.toFixed(3)}s`);
-    } else {
-      console.log(`Current Audio Time: ${t.toFixed(3)}s | No active segment found`);
     }
 
     if (foundIndex !== activeLineIndex) {
@@ -152,16 +150,16 @@ const App: React.FC = () => {
   const processTranscription = async () => {
     if (!file) return;
     const service = new GeminiService();
-    setStatus({ step: 'uploading', message: '正在初始化毫秒級校正引擎...', progress: 5 });
+    setStatus({ step: 'uploading', message: '正在初始化高精度校正引擎...', progress: 2 });
     try {
       const finalResult = await service.processAudio(file, (msg, prog) => {
         setStatus(prev => ({ ...prev, message: msg, progress: prog, step: 'transcribing' }));
       });
       setResult(finalResult);
-      setStatus({ step: 'completed', message: '處理完成！', progress: 100 });
+      setStatus({ step: 'completed', message: '分析完成！', progress: 100 });
     } catch (error) {
       console.error(error);
-      setStatus({ step: 'error', message: '分析失敗，請檢查網路後再試。', progress: 0 });
+      setStatus({ step: 'error', message: '分析失敗。音檔可能過大或格式不支援。', progress: 0 });
     }
   };
 
@@ -225,7 +223,6 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* Optimized Header with Player */}
       <header className="bg-slate-900/98 backdrop-blur-2xl border-b border-slate-800 sticky top-0 z-40 shadow-2xl h-16 transition-all duration-300">
         <div className="max-w-[1500px] mx-auto px-4 h-full flex items-center justify-between gap-6">
           <div className="flex items-center gap-3 flex-shrink-0">
@@ -305,25 +302,18 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      {/* Main Content */}
       <main className="max-w-7xl mx-auto px-6 py-12 pb-24">
         {!result && status.step !== 'transcribing' && (
           <div className="max-w-xl mx-auto bg-slate-900/50 rounded-[3rem] border-2 border-dashed border-slate-800/50 p-16 text-center mt-12 shadow-inner backdrop-blur-sm">
             <div className="w-20 h-20 bg-blue-500/10 rounded-3xl flex items-center justify-center mx-auto mb-8">
               <Upload className="w-10 h-10 text-blue-500" />
             </div>
-            <h2 className="text-2xl font-black text-white mb-3">高精度語音對齊工具</h2>
-            <p className="text-slate-500 mb-10 text-sm leading-relaxed max-w-xs mx-auto font-medium">基於 Gemini Pro 的毫秒級分析，為您打造完美的學習逐字稿。</p>
+            <h2 className="text-2xl font-black text-white mb-3">精準對位逐字稿工具</h2>
+            <p className="text-slate-500 mb-10 text-sm leading-relaxed max-w-xs mx-auto font-medium">基於 Gemini Pro 的精準分析，為您打造完美的學習體驗。</p>
             <input type="file" accept="audio/*" className="hidden" ref={fileInputRef} onChange={handleFileChange} />
             <button onClick={() => fileInputRef.current?.click()} className="bg-white text-slate-950 px-10 py-4 rounded-2xl font-black hover:bg-slate-100 transition-all mx-auto block shadow-xl active:scale-95">
               {file ? '換一個檔案' : '點此上傳音檔'}
             </button>
-            {file && (
-              <div className="mt-6 inline-flex items-center gap-2 bg-slate-800/80 px-4 py-2 rounded-full border border-slate-700">
-                <FileAudio className="w-4 h-4 text-blue-400" />
-                <span className="text-xs text-slate-300 font-mono font-bold truncate max-w-[150px]">{file.name}</span>
-              </div>
-            )}
           </div>
         )}
 
@@ -345,12 +335,6 @@ const App: React.FC = () => {
                 <div className="flex items-center gap-3">
                   <div className="w-1 h-8 bg-blue-500 rounded-full" />
                   <h2 className="text-2xl font-black text-white tracking-tight">逐字稿對齊</h2>
-                </div>
-                <div className="flex gap-2">
-                  <button onClick={() => setAutoScroll(!autoScroll)} className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-2 ${autoScroll ? 'bg-blue-600/10 text-blue-400 border border-blue-500/20' : 'bg-slate-800 text-slate-500 border border-slate-700'}`}>
-                    <Settings2 className="w-3.5 h-3.5" />
-                    Auto Scroll: {autoScroll ? 'ON' : 'OFF'}
-                  </button>
                 </div>
               </div>
               <div className="space-y-4 pb-48">
@@ -390,7 +374,6 @@ const App: React.FC = () => {
         )}
       </main>
 
-      {/* Vocabulary Bank Drawer */}
       <div className={`fixed inset-y-0 right-0 w-80 sm:w-96 bg-slate-900 border-l border-slate-800 shadow-[0_0_50px_rgba(0,0,0,0.5)] z-[60] transform transition-transform duration-700 cubic-bezier(0.23, 1, 0.32, 1) ${isBankOpen ? 'translate-x-0' : 'translate-x-full'}`}>
         <div className="h-full flex flex-col p-10">
           <div className="flex items-center justify-between mb-10">
@@ -453,12 +436,6 @@ const App: React.FC = () => {
           background: #1e293b;
           border-radius: 10px;
         }
-        
-        @keyframes pulse {
-          0%, 100% { transform: scale(1); opacity: 1; }
-          50% { transform: scale(1.1); opacity: 0.7; }
-        }
-        .animate-pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
       `}</style>
     </div>
   );
