@@ -20,26 +20,26 @@ const VocabularyCard: React.FC<VocabularyCardProps> = ({ item, index, onRightCli
     <div 
       id={`vocab-${index}`}
       onContextMenu={handleContextMenu}
-      className="bg-slate-900 p-5 rounded-2xl border border-slate-800 shadow-lg hover:border-blue-500/30 transition-all group cursor-help scroll-mt-40"
+      className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm hover:border-blue-400 hover:shadow-md transition-all group cursor-help scroll-mt-40"
       title="右鍵點擊可加入生詞庫"
     >
       <div className="flex items-baseline gap-3 mb-2 flex-wrap">
         <h3 
           onClick={() => onWordJump(item.word)}
-          className="text-xl font-bold text-slate-100 group-hover:text-blue-400 transition-colors cursor-pointer hover:underline underline-offset-4"
+          className="text-xl font-bold text-slate-900 group-hover:text-blue-600 transition-colors cursor-pointer hover:underline underline-offset-4"
           title="點擊跳回逐字稿出現位置"
         >
           {item.word}
         </h3>
-        <span className="text-sm font-mono text-slate-500">
+        <span className="text-sm font-mono text-slate-400">
           {item.ipa}
         </span>
       </div>
-      <p className="text-blue-400 font-medium mb-3 text-sm">
+      <p className="text-blue-600 font-medium mb-3 text-sm">
         {item.definition}
       </p>
-      <div className="bg-slate-950 p-3 rounded-xl border-l-4 border-blue-500/50">
-        <p className="text-sm italic text-slate-400 leading-relaxed">
+      <div className="bg-slate-50 p-3 rounded-xl border-l-4 border-blue-600/30">
+        <p className="text-sm italic text-slate-500 leading-relaxed">
           "{item.example}"
         </p>
       </div>
