@@ -8,18 +8,33 @@ const OVERLAP_DURATION = 20; // 20s overlap to provide context for boundary sent
 const STEP_SIZE = CHUNK_DURATION - OVERLAP_DURATION; // 160s step size
 const MAX_CONCURRENCY = 2; 
 
-export const parseTimeToSeconds = (time: string | number): number => {
+/**
+ * Robustly parses time into seconds. 
+ * Handles MM:SS, HH:MM:SS, and Float strings/numbers.
+ */
+export const parseTimeToSeconds = (time: string | number | undefined | null): number => {
+  if (time === undefined || time === null) return 0;
   if (typeof time === 'number') return time;
-  if (!time) return 0;
-  const parts = String(time).split(':').map(Number);
-  if (parts.length === 2) return parts[0] * 60 + parts[1];
-  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
-  return parseFloat(String(time)) || 0;
+  
+  const timeStr = String(time).trim();
+  if (!timeStr) return 0;
+
+  // Handle formats like "02:45.500" or "01:20"
+  if (timeStr.includes(':')) {
+    const parts = timeStr.split(':').map(Number);
+    if (parts.length === 2) {
+      return parts[0] * 60 + (parts[1] || 0); // MM:SS
+    }
+    if (parts.length === 3) {
+      return parts[0] * 3600 + parts[1] * 60 + (parts[2] || 0); // HH:MM:SS
+    }
+  }
+  
+  return parseFloat(timeStr) || 0;
 };
 
 /**
  * Converts an AudioBuffer to a WAV Blob (PCM 16-bit, 16000Hz, Mono).
- * This ensures the audio data length exactly matches the expected duration.
  */
 function bufferToWav(abuffer: AudioBuffer): Blob {
   const numOfChan = 1;
@@ -66,29 +81,30 @@ export class GeminiService {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
     const prompt = `
-      You are a professional verbatim transcriber. Your task is to transcribe this audio chunk (Chunk #${chunkIndex}) with absolute precision.
-      
-      STRICT VERBATIM REQUIREMENTS:
-      1. **NO SKIPPING:** Transcribe every single word. Do not omit any section, even if it is quiet or redundant.
-      2. **NO SUMMARIZATION:** Never paraphrase or summarize. Transcribe exactly what is spoken word-for-word.
-      3. **UNINTELLIGIBLE PARTS:** If a phrase is truly unintelligible, mark it as [unintelligible].
-      
-      TIMING & BOUNDARY RULES:
-      - This clip is exactly ${clipDuration.toFixed(2)} seconds long.
-      - 0.00s is the absolute start of this clip.
-      - If a sentence begins at the very end of the clip, transcribe it as much as you can.
-      - Ensure your timestamps are accurate to the 16kHz audio samples.
-      
+      You are a professional verbatim transcriber for a linguistics project.
+      Transcribe this SPECIFIC audio clip (Chunk #${chunkIndex}, total duration ${clipDuration.toFixed(2)}s).
+
+      CRITICAL INSTRUCTION ON TIMESTAMPS:
+      1. **RELATIVE TIMELINE:** Treat the very beginning of this provided audio segment as 0.00 seconds.
+      2. **PRECISION:** Assign a unique startTimeInSeconds and endTimeInSeconds for EVERY sentence or logical phrase.
+      3. **INCREMENTAL:** Timestamps MUST increase as the audio progresses. Do NOT give multiple sentences the same timestamp.
+      4. **FULL COVERAGE:** Transcribe from 0.00s until the end of the clip (${clipDuration.toFixed(2)}s).
+
+      VERBATIM RULES:
+      - Transcribe word-for-word. Do not summarize.
+      - Do not skip filler words (um, ah, like) if they are clearly audible.
+      - Mark unclear segments as [unintelligible].
+
       TASK:
       - Transcribe all English speech.
-      - Identify speakers (e.g., GAVIN, HOST).
+      - Distinguish speakers clearly (e.g., GAVIN, HOST, SPEAKER_1).
       - Provide a natural Traditional Chinese (Taiwan) translation.
-      - Extract B2+ level academic vocabulary.
+      - Extract B2+ academic vocabulary items.
 
       Return ONLY JSON:
       {
-        "transcript": [{ "speaker": "Speaker", "english": "Text", "chinese": "翻譯", "startTimeInSeconds": 0.00, "endTimeInSeconds": 0.00 }],
-        "vocabulary": [...]
+        "transcript": [{ "speaker": "Name", "english": "Verbatim English", "chinese": "中文翻譯", "startTimeInSeconds": 0.00, "endTimeInSeconds": 1.50 }],
+        "vocabulary": [{ "word": "term", "ipa": "/tɜːrm/", "definition": "def", "example": "ex" }]
       }
     `;
 
@@ -98,7 +114,7 @@ export class GeminiService {
         contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType, data: base64Data } }] }],
         config: {
           responseMimeType: "application/json",
-          thinkingConfig: { thinkingBudget: 8000 },
+          thinkingConfig: { thinkingBudget: 12000 },
           responseSchema: {
             type: Type.OBJECT,
             properties: {
@@ -110,8 +126,8 @@ export class GeminiService {
                     speaker: { type: Type.STRING },
                     english: { type: Type.STRING },
                     chinese: { type: Type.STRING },
-                    startTimeInSeconds: { type: Type.NUMBER },
-                    endTimeInSeconds: { type: Type.NUMBER },
+                    startTimeInSeconds: { type: Type.NUMBER, description: "Seconds from the start of THIS clip (0.0 to clip length)" },
+                    endTimeInSeconds: { type: Type.NUMBER, description: "Seconds from the start of THIS clip (0.0 to clip length)" },
                   },
                   required: ["speaker", "english", "chinese", "startTimeInSeconds", "endTimeInSeconds"],
                 },
@@ -136,11 +152,14 @@ export class GeminiService {
       });
 
       const parsed = JSON.parse(response.text || "{}") as TranscriptionResult;
-      parsed.transcript = (parsed.transcript || []).map(line => ({
-        ...line,
-        startTimeInSeconds: parseTimeToSeconds(line.startTimeInSeconds),
-        endTimeInSeconds: parseTimeToSeconds(line.endTimeInSeconds),
-      }));
+      // Re-parse timestamps to ensure they are floats, just in case schema enforcement is loose
+      if (parsed.transcript) {
+        parsed.transcript = parsed.transcript.map(line => ({
+          ...line,
+          startTimeInSeconds: parseTimeToSeconds(line.startTimeInSeconds),
+          endTimeInSeconds: parseTimeToSeconds(line.endTimeInSeconds),
+        }));
+      }
       return parsed;
     } catch (error) {
       console.error(`Gemini Error on Chunk ${chunkIndex}:`, error);
@@ -179,7 +198,9 @@ export class GeminiService {
     onProgress(`啟動 AI 逐字稿分析 (共 ${chunks.length} 個區塊)...`, 15);
 
     const tasks = chunks.map(async (chunk, index) => {
-      await new Promise(r => setTimeout(r, index * 200)); // Staggered start
+      // Small delay to prevent burst limits
+      await new Promise(r => setTimeout(r, index * 250)); 
+      
       while (completedCount - chunkResults.filter(r => r).length >= MAX_CONCURRENCY) {
         await new Promise(r => setTimeout(r, 500));
       }
@@ -194,6 +215,7 @@ export class GeminiService {
         const base64 = await base64Promise;
         chunkResults[index] = await this.transcribeChunk(base64, "audio/wav", index, chunk.duration);
       } catch (e) {
+        console.error(`Error processing chunk ${index}:`, e);
         chunkResults[index] = { transcript: [], vocabulary: [] };
       }
 
@@ -206,17 +228,21 @@ export class GeminiService {
     onProgress("整合全域時間軸並校正無縫銜接...", 98);
 
     chunkResults.forEach((result, index) => {
-      if (!result) return;
+      if (!result || !result.transcript) return;
+      
+      // Calculate the global second where THIS chunk begins
       const globalOffset = index * STEP_SIZE;
       
       result.transcript.forEach((line) => {
         // Tiled Ownership Logic: 
-        // A chunk "owns" any sentence that starts within its exclusive tile [0, STEP_SIZE).
-        // The last chunk owns everything remaining.
+        // A chunk "owns" any sentence that STARTS within its unique tile [0, STEP_SIZE).
+        // The last chunk owns everything from its start to the end of the file.
         const isLastChunk = index === chunks.length - 1;
         const startsInThisTile = line.startTimeInSeconds < STEP_SIZE;
 
         if (isLastChunk || startsInThisTile) {
+          // KEY FIX: Mathematically add the relative offset (line.startTimeInSeconds) 
+          // to the global base time (globalOffset).
           fullResult.transcript.push({
             ...line,
             startTimeInSeconds: globalOffset + line.startTimeInSeconds,
@@ -225,11 +251,13 @@ export class GeminiService {
         }
       });
 
-      result.vocabulary.forEach((item) => {
-        if (!fullResult.vocabulary.some(v => v.word.toLowerCase() === item.word.toLowerCase())) {
-          fullResult.vocabulary.push(item);
-        }
-      });
+      if (result.vocabulary) {
+        result.vocabulary.forEach((item) => {
+          if (!fullResult.vocabulary.some(v => v.word.toLowerCase() === item.word.toLowerCase())) {
+            fullResult.vocabulary.push(item);
+          }
+        });
+      }
     });
 
     fullResult.transcript.sort((a, b) => a.startTimeInSeconds - b.startTimeInSeconds);
