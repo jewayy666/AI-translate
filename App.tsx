@@ -17,6 +17,7 @@ const App: React.FC = () => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [readingIndex, setReadingIndex] = useState(0);
   
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isDarkMode, setIsDarkMode] = useState(() => {
@@ -78,44 +79,29 @@ const App: React.FC = () => {
     }
   }, []);
 
-  /**
-   * 時間軸批量位移校正
-   * @param startIndex 從哪一句開始校正
-   * @param timeDelta 位移差值 (秒)
-   */
-  const handleShiftTimestamps = useCallback(async (startIndex: number, timeDelta: number) => {
-    if (!activeItem) return;
-
-    // 1. 計算新的 lines 資料
-    const updatedLines = activeItem.lines.map((line, idx) => {
-      if (idx >= startIndex) {
-        const newStartTime = Math.max(0, line.startTime + timeDelta);
-        return {
-          ...line,
-          startTime: newStartTime,
-          timestamp: formatTime(newStartTime)
-        };
-      }
-      return line;
-    });
-
-    const updatedItem = { ...activeItem, lines: updatedLines };
-    
-    // 2. 更新狀態
-    setActiveItem(updatedItem);
-    setHistory(prev => prev.map(h => h.id === updatedItem.id ? updatedItem : h));
-
-    // 3. 持久化到 IndexedDB (注意：需保留原始 Blob)
-    try {
-      const originalBlob = (activeItem as any).audioBlob;
-      if (originalBlob) {
-        await saveItem(updatedItem, originalBlob);
-        console.log(`Successfully shifted timestamps from index ${startIndex} by ${timeDelta.toFixed(2)}s`);
-      }
-    } catch (err) {
-      console.error("Failed to save shifted timestamps to DB", err);
+  // 段落導覽邏輯
+  const scrollToIndex = useCallback((index: number) => {
+    const el = document.getElementById(`transcript-segment-${index}`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
-  }, [activeItem]);
+  }, []);
+
+  const handlePrevSegment = useCallback(() => {
+    if (!activeItem) return;
+    const nextIdx = Math.max(0, readingIndex - 1);
+    setReadingIndex(nextIdx);
+    scrollToIndex(nextIdx);
+    handleSeek(activeItem.lines[nextIdx].startTime);
+  }, [activeItem, readingIndex, scrollToIndex, handleSeek]);
+
+  const handleNextSegment = useCallback(() => {
+    if (!activeItem) return;
+    const nextIdx = Math.min(activeItem.lines.length - 1, readingIndex + 1);
+    setReadingIndex(nextIdx);
+    scrollToIndex(nextIdx);
+    handleSeek(activeItem.lines[nextIdx].startTime);
+  }, [activeItem, readingIndex, scrollToIndex, handleSeek]);
 
   const handleTranscriptVocabClick = useCallback((text: string) => {
     const el = document.getElementById(`vocab-${text}`);
@@ -128,23 +114,20 @@ const App: React.FC = () => {
 
   const handleAddToVocabulary = useCallback(async (text: string, time: number) => {
     if (isLookupLoading) return;
-    
     setIsLookupLoading(true);
     try {
       const result = await lookupVocabulary(text);
       const newEntry = { ...result, timestamp: time }; 
-
       setVocabularyList(prev => {
         if (prev.some(v => v.text.toLowerCase() === newEntry.text.toLowerCase())) return prev;
         return [newEntry, ...prev];
       });
-
       setTimeout(() => {
         const el = document.getElementById(`vocab-${newEntry.text}`);
         if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }, 300);
     } catch (err: any) {
-      alert(err.message || "查詢失敗，請檢查網路或 API Key 設定。");
+      alert(err.message || "查詢失敗。");
     } finally {
       setIsLookupLoading(false);
     }
@@ -155,9 +138,7 @@ const App: React.FC = () => {
     if (activeItem) {
       activeItem.lines.forEach(line => {
         line.segments.forEach(seg => {
-          if (seg.highlights) {
-            aiKeywords.push(...seg.highlights);
-          }
+          if (seg.highlights) aiKeywords.push(...seg.highlights);
         });
       });
     }
@@ -172,59 +153,28 @@ const App: React.FC = () => {
 
     let exportContent = "";
     if (vocabularyList.length > 0) {
-      exportContent += "新增生詞\r\n---------------------------\r\n";
-      exportContent += vocabularyList.map(formatItem).join('\r\n');
-      exportContent += "\r\n\r\n";
+      exportContent += "新增生詞\r\n---------------------------\r\n" + vocabularyList.map(formatItem).join('\r\n') + "\r\n\r\n";
     }
-    if (aiKeywords.length > 0) {
-      const userVocabTexts = new Set(vocabularyList.map(v => (v.text || "").toLowerCase().trim()));
-      const filteredAiKeywords = aiKeywords.filter(h => !userVocabTexts.has((h.text || "").toLowerCase().trim()));
-      if (filteredAiKeywords.length > 0) {
-        exportContent += "智慧單字\r\n---------------------------\r\n";
-        exportContent += filteredAiKeywords.map(formatItem).join('\r\n');
-      }
-    }
-
-    if (!exportContent.trim()) {
-      alert('目前沒有單字可匯出');
-      return;
-    }
-
     const blob = new Blob([exportContent], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
     link.download = `vocabulary_list_${new Date().toISOString().slice(0, 10)}.txt`;
-    document.body.appendChild(link);
     link.click();
-    document.body.removeChild(link);
     URL.revokeObjectURL(url);
   }, [vocabularyList, activeItem]);
 
   const handleSidebarVocabClick = useCallback((time: number, text: string) => {
-    if (audioRef.current) {
-      audioRef.current.currentTime = time;
-      setCurrentTime(time);
-      audioRef.current.play().catch(() => {});
-      setIsPlaying(true);
-    }
+    handleSeek(time);
     const lineIndex = activeItem?.lines.findIndex(l => l.startTime === time);
     if (lineIndex !== undefined && lineIndex !== -1) {
-      const el = document.getElementById(`transcript-segment-${lineIndex}`);
-      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setReadingIndex(lineIndex);
+      scrollToIndex(lineIndex);
     }
-  }, [activeItem]);
+  }, [activeItem, handleSeek, scrollToIndex]);
 
   return (
     <div className="h-screen flex flex-col bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100 overflow-hidden font-sans transition-colors duration-300">
-      {isLookupLoading && (
-        <div className="fixed top-4 right-4 z-[2000] bg-indigo-600 text-white px-4 py-2 rounded-full shadow-lg flex items-center space-x-2 animate-bounce">
-          <svg className="animate-spin h-4 w-4 text-white" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-          <span className="text-xs font-bold">AI 查詢中...</span>
-        </div>
-      )}
-
-      {/* 頂部功能列：整合播放器與資訊 */}
       <header className="bg-white dark:bg-gray-900 border-b dark:border-gray-800 h-24 flex items-center shrink-0 z-50 shadow-sm transition-colors">
         {activeItem ? (
           <div className="flex w-full items-center px-6">
@@ -238,12 +188,13 @@ const App: React.FC = () => {
                 onTimeUpdate={setCurrentTime} 
                 onDurationChange={setDuration} 
                 seekTo={handleSeek}
+                onPrevSegment={handlePrevSegment}
+                onNextSegment={handleNextSegment}
               />
             </div>
             <div className="w-[30%] border-l dark:border-gray-800 ml-8 pl-8 flex items-center justify-between">
               <div className="truncate">
                 <h2 className="text-base font-bold text-gray-800 dark:text-gray-100 truncate">{activeItem.name}</h2>
-                <p className="text-[10px] text-indigo-500 font-bold uppercase tracking-widest mt-0.5">English Learning Mode</p>
               </div>
               <div className="flex items-center space-x-3">
                 <button 
@@ -267,10 +218,7 @@ const App: React.FC = () => {
               <span className="font-black text-2xl tracking-tight">AudioTranscriber <span className="text-indigo-600">Pro</span></span>
             </div>
             <div className="flex items-center space-x-4">
-               <button 
-                onClick={() => setIsDarkMode(!isDarkMode)}
-                className="p-2.5 rounded-xl bg-slate-50 dark:bg-gray-800 text-slate-400 hover:text-indigo-600 transition-all"
-              >
+               <button onClick={() => setIsDarkMode(!isDarkMode)} className="p-2.5 rounded-xl bg-slate-50 dark:bg-gray-800 text-slate-400 hover:text-indigo-600 transition-all">
                 {isDarkMode ? <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364-6.364l-.707.707M6.343 17.657l-.707.707M16.243 17.657l.707.707M7.757 6.364l.707.707M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg> : <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" /></svg>}
               </button>
               <button onClick={() => setIsImportOpen(true)} className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2.5 rounded-xl font-bold shadow-xl shadow-indigo-100 flex items-center transition-all active:scale-95">
@@ -289,30 +237,21 @@ const App: React.FC = () => {
               <TranscriptViewer 
                 lines={activeItem.lines} 
                 currentTime={currentTime}
+                readingIndex={readingIndex}
+                onFocusSegment={setReadingIndex}
                 onSeek={handleSeek} 
                 onVocabClick={handleTranscriptVocabClick} 
                 onAddToVocab={handleAddToVocabulary}
-                onShiftTimestamps={handleShiftTimestamps}
               />
             </div>
-
-            {/* 側邊單字庫 */}
             <div className={`h-full border-l dark:border-gray-800 bg-white dark:bg-gray-900 transition-all duration-300 ${isSidebarOpen ? 'w-[320px] md:w-[380px] opacity-100' : 'w-0 opacity-0 pointer-events-none'}`}>
-              <VocabSidebar 
-                lines={activeItem.lines} 
-                userVocab={vocabularyList}
-                onVocabClick={handleSidebarVocabClick} 
-                onExport={handleExportVocab}
-              />
+              <VocabSidebar lines={activeItem.lines} userVocab={vocabularyList} onVocabClick={handleSidebarVocabClick} onExport={handleExportVocab} />
             </div>
           </div>
         ) : (
           <div className="flex-1 overflow-y-auto p-12 bg-slate-50 dark:bg-gray-950 transition-colors duration-300">
             <div className="max-w-7xl mx-auto">
-              <div className="flex items-baseline space-x-4 mb-10">
-                <h1 className="text-4xl font-black text-slate-900 dark:text-gray-100">學習歷史</h1>
-                <span className="text-slate-400 font-bold uppercase tracking-tighter text-sm">Review Your Progress</span>
-              </div>
+              <h1 className="text-4xl font-black text-slate-900 dark:text-gray-100 mb-10">學習歷史</h1>
               <HistoryList items={history} onSelectItem={(it) => setActiveItem(it)} onDeleteItem={(id) => deleteFromDB(id).then(loadHistory)} />
             </div>
           </div>

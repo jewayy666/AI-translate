@@ -10,6 +10,8 @@ interface AudioPlayerProps {
   setIsPlaying: (playing: boolean) => void;
   currentTime: number;
   seekTo: (time: number) => void;
+  onPrevSegment?: () => void;
+  onNextSegment?: () => void;
 }
 
 const AudioPlayer = forwardRef<HTMLAudioElement, AudioPlayerProps>(({
@@ -19,7 +21,9 @@ const AudioPlayer = forwardRef<HTMLAudioElement, AudioPlayerProps>(({
   isPlaying,
   setIsPlaying,
   currentTime,
-  seekTo
+  seekTo,
+  onPrevSegment,
+  onNextSegment
 }, ref) => {
   const localAudioRef = useRef<HTMLAudioElement | null>(null);
   const [volume, setVolume] = useState(1);
@@ -88,12 +92,20 @@ const AudioPlayer = forwardRef<HTMLAudioElement, AudioPlayerProps>(({
           e.preventDefault();
           skip(-10);
           break;
+        case 'ArrowUp':
+          e.preventDefault();
+          onPrevSegment?.();
+          break;
+        case 'ArrowDown':
+          e.preventDefault();
+          onNextSegment?.();
+          break;
       }
     };
     
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isPlaying, setIsPlaying, skip]);
+  }, [isPlaying, setIsPlaying, skip, onPrevSegment, onNextSegment]);
 
   return (
     <div className="w-full h-full flex flex-col justify-center px-4">
@@ -107,10 +119,27 @@ const AudioPlayer = forwardRef<HTMLAudioElement, AudioPlayerProps>(({
 
       <div className="flex items-center space-x-6">
         {/* 主要控制鈕組 */}
-        <div className="flex items-center space-x-3 shrink-0">
+        <div className="flex items-center space-x-2 shrink-0">
+          {/* 上一段按鈕 */}
+          <button 
+            onClick={onPrevSegment}
+            className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all"
+            title="上一段 (Up Arrow)"
+          >
+            <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
+          </button>
+
+          <button 
+            onClick={() => skip(-10)}
+            className="p-2 text-slate-400 hover:text-indigo-600 transition-colors"
+            title="後退 10 秒 (Left Arrow)"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0019 16V8a1 1 0 00-1.6-.8l-5.334 4zM4.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0111 16V8a1 1 0 00-1.6-.8l-5.334 4z" /></svg>
+          </button>
+
           <button 
             onClick={() => setIsPlaying(!isPlaying)}
-            className="w-12 h-12 flex items-center justify-center bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-all shadow-lg active:scale-95"
+            className="w-12 h-12 flex items-center justify-center bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-all shadow-lg active:scale-95 mx-1"
             title="播放/暫停 (Space)"
           >
             {isPlaying ? (
@@ -120,22 +149,22 @@ const AudioPlayer = forwardRef<HTMLAudioElement, AudioPlayerProps>(({
             )}
           </button>
 
-          <div className="flex items-center">
-            <button 
-              onClick={() => skip(-10)}
-              className="p-2 text-slate-400 hover:text-indigo-600 transition-colors"
-              title="後退 10 秒 (Left Arrow)"
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0019 16V8a1 1 0 00-1.6-.8l-5.334 4zM4.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0111 16V8a1 1 0 00-1.6-.8l-5.334 4z" /></svg>
-            </button>
-            <button 
-              onClick={() => skip(10)}
-              className="p-2 text-slate-400 hover:text-indigo-600 transition-colors"
-              title="前進 10 秒 (Right Arrow)"
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M11.933 12.8a1 1 0 000-1.6L6.599 7.2A1 1 0 005 8v8a1 1 0 001.599.8l5.334-4zM19.933 12.8a1 1 0 000-1.6l-5.334-4A1 1 0 0013 8v8a1 1 0 001.599.8l5.334-4z" /></svg>
-            </button>
-          </div>
+          <button 
+            onClick={() => skip(10)}
+            className="p-2 text-slate-400 hover:text-indigo-600 transition-colors"
+            title="前進 10 秒 (Right Arrow)"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M11.933 12.8a1 1 0 000-1.6L6.599 7.2A1 1 0 005 8v8a1 1 0 001.599.8l5.334-4zM19.933 12.8a1 1 0 000-1.6l-5.334-4A1 1 0 0013 8v8a1 1 0 001.599.8l5.334-4z" /></svg>
+          </button>
+
+          {/* 下一段按鈕 */}
+          <button 
+            onClick={onNextSegment}
+            className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all"
+            title="下一段 (Down Arrow)"
+          >
+            <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+          </button>
         </div>
 
         {/* 進度與時間 */}
